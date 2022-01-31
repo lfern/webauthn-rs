@@ -6,7 +6,7 @@ use yew::prelude::*;
 use yew::format::{Json, Nothing};
 use yew::services::ConsoleService;
 use yew::services::fetch::{FetchService, FetchTask, Request, Response};
-use webauthn_rs::proto::{CreationChallengeResponse, RegisterPublicKeyCredential, RequestChallengeResponse, PublicKeyCredential};
+use webauthn_rs::proto::{CreationChallengeResponse, RegisterPublicKeyCredential, RequestChallengeResponse, PublicKeyCredential, NewChallenge};
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_futures::spawn_local;
 
@@ -25,7 +25,7 @@ pub enum AppMsg {
     DoNothing,
     BeginRegisterChallenge(web_sys::CredentialCreationOptions, String),
     CompleteRegisterChallenge(JsValue, String),
-    BeginLoginChallenge(web_sys::CredentialRequestOptions, String),
+    BeginLoginChallenge(web_sys::CredentialRequestOptions, String, Option<String>),
     CompleteLoginChallenge(JsValue, String),
     Toast(String)
 }
@@ -85,8 +85,13 @@ impl App {
                 ConsoleService::log(format!("body -> {:?}", body).as_str());
                 match body {
                     Json(Ok(rcr)) => {
+                        let chal1: Vec<u8> = rcr.public_key.challenge.clone().into();
+                        let str = String::from_utf8_lossy(&chal1);
+                        ConsoleService::log(format!("lfern1 -> {:?}", str).as_str());
+                        let chal2: NewChallenge = serde_json::from_str(&str).unwrap();
+                        ConsoleService::log(format!("lfern1 -> {:?}", chal2).as_str());
                         let c_options = rcr.into();
-                        AppMsg::BeginLoginChallenge(c_options, username_copy.clone())
+                        AppMsg::BeginLoginChallenge(c_options, username_copy.clone(), Some(chal2.cmd.clone()))
                     }
                     Json(Err(_)) => {
                         AppMsg::DoNothing
@@ -186,27 +191,42 @@ impl Component for App {
                 let username = self.username.clone();
                 self.ft = Some(self.login_begin(username));
             }
-            AppMsg::BeginLoginChallenge(cro, username) => {
+            AppMsg::BeginLoginChallenge(cro, username, message) => {
                 if let Some(win) = web_sys::window() {
-                    ConsoleService::log(format!("cro -> {:?}", cro).as_str());
-                    let promise = win.navigator()
-                        .credentials()
-                        .get_with_options(&cro)
-                        .expect("Unable to create promise");
-                    let fut = JsFuture::from(promise);
-                    let linkc = self.link.clone();
 
-                    spawn_local(async move {
-                        match fut.await {
-                            Ok(data) => {
-                                linkc.send_message(AppMsg::CompleteLoginChallenge(data, username));
+                    let cont = match message {
+                        Some(message) => {
+                            win.confirm_with_message(
+                                format!("Do you want to confirm this command?\n{}", message).as_str()
+                            ).expect("Unable to show message")
+                        },
+                        _ => true
+                    };
+
+                    if cont {
+                        ConsoleService::log(format!("cro -> {:?}", cro).as_str());
+                        let promise = win.navigator()
+                            .credentials()
+                            .get_with_options(&cro)
+                            .expect("Unable to create promise");
+                        let fut = JsFuture::from(promise);
+                        let linkc = self.link.clone();
+
+                        spawn_local(async move {
+                            match fut.await {
+                                Ok(data) => {
+                                    linkc.send_message(AppMsg::CompleteLoginChallenge(data, username));
+                                }
+                                Err(e) => {
+                                    ConsoleService::log(format!("error -> {:?}", e).as_str());
+                                    linkc.send_message(AppMsg::DoNothing);
+                                }
                             }
-                            Err(e) => {
-                                ConsoleService::log(format!("error -> {:?}", e).as_str());
-                                linkc.send_message(AppMsg::DoNothing);
-                            }
-                        }
-                    });
+                        });
+                    } else {
+                        ConsoleService::log(format!("login canceled by user").as_str());    
+                    }
+
                 } else {
                     ConsoleService::log(format!("login failed for -> {:?}", self.username).as_str());
                 }

@@ -790,6 +790,14 @@ impl<T> Webauthn<T> {
     {
         let chal = self.generate_challenge();
 
+        let new_chal = NewChallenge {
+            cha: chal.clone().into(),
+            cmd: "this is a veeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeery very very very very very long command ????".to_string(),
+        };
+
+        let new_chal2 = serde_json::to_string(&new_chal).unwrap();
+        let chal = Challenge::new(new_chal2.as_bytes().to_vec());
+
         // Get the user's existing creds if any.
         let ac = creds
             .iter()

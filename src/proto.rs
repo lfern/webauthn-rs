@@ -13,7 +13,10 @@ use std::ops::Deref;
 use wasm_bindgen::prelude::*;
 
 use nom::bytes::complete::take;
-use nom::combinator::{cond, map_opt, map_res, verify};
+use nom::combinator::{map_opt, verify};
+#[cfg(feature = "core")]
+use nom::combinator::{cond, map_res};
+
 use nom::error::ParseError;
 use nom::number::complete::{be_u16, be_u32, be_u64};
 
@@ -30,6 +33,15 @@ pub type Aaguid = Vec<u8>;
 /// A challenge issued by the server. This contains a set of random bytes.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Challenge(Vec<u8>);
+
+/// A new challenge
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NewChallenge {
+    /// old challenge
+    pub cha: Base64UrlSafeData,
+    /// message to show to the client
+    pub cmd: String,
+}
 
 #[cfg(feature = "core")]
 impl Challenge {
