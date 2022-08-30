@@ -1,7 +1,7 @@
 use webauthn_rs::error::WebauthnError;
 use webauthn_rs::proto::{
     CreationChallengeResponse, Credential, CredentialID, PublicKeyCredential,
-    RegisterPublicKeyCredential, RequestChallengeResponse, UserId,
+    RegisterPublicKeyCredential, RequestChallengeResponse, UserId, AuthenticatorAssertionResponseRaw,
 };
 use webauthn_rs::{
     ephemeral::WebauthnEphemeralConfig,
@@ -22,6 +22,7 @@ pub struct WebauthnActor {
     reg_chals: Mutex<LruCache<UserId, RegistrationState>>,
     auth_chals: Mutex<LruCache<UserId, AuthenticationState>>,
     creds: Mutex<BTreeMap<UserId, BTreeMap<CredentialID, Credential>>>,
+    commconf_chals:Mutex<LruCache<UserId, AuthenticationState>>,
 }
 
 impl WebauthnActor {
@@ -31,6 +32,7 @@ impl WebauthnActor {
             reg_chals: Mutex::new(LruCache::new(CHALLENGE_CACHE_SIZE)),
             auth_chals: Mutex::new(LruCache::new(CHALLENGE_CACHE_SIZE)),
             creds: Mutex::new(BTreeMap::new()),
+            commconf_chals: Mutex::new(LruCache::new(CHALLENGE_CACHE_SIZE)),
         }
     }
 
@@ -83,6 +85,44 @@ impl WebauthnActor {
             .await
             .put(username.as_bytes().to_vec(), st);
         debug!("complete ChallengeAuthenticate -> {:?}", acr);
+        Ok(acr)
+    }
+
+    pub async fn challenge_command_confirmation(
+        &self,
+        username: &String,
+        command: &String
+    ) -> WebauthnResult<RequestChallengeResponse> {
+        debug!("handle ChallengeCommandConfirmation -> {:?}", username);
+
+        let creds = match self.creds.lock().await.get(&username.as_bytes().to_vec()) {
+            Some(creds) => Some(creds.iter().map(|(_, v)| v.clone()).collect()),
+            None => None,
+        }
+        .ok_or(WebauthnError::CredentialRetrievalError)?;
+
+        let exts = RequestAuthenticationExtensions::builder()
+        .get_cred_blob(true)
+        .build();
+
+        let (acr, st) = self
+            .wan
+            .generate_challenge_command_confirmation_options(creds, Some(exts), command)?;
+
+
+        let mut user_chan = username.clone();
+        user_chan.push_str("@");
+        let mut user_chan_vector = user_chan.as_bytes().to_vec();
+        user_chan_vector.extend_from_slice(acr.public_key.challenge.as_ref());
+
+        acr.public_key.challenge.as_ref();
+        
+        self.commconf_chals
+            .lock()
+            .await
+            .put(user_chan_vector, st);
+
+        debug!("complete ChallengeCommandConfirmation -> {:?}", acr);
         Ok(acr)
     }
 
@@ -170,6 +210,54 @@ impl WebauthnActor {
                 ()
             });
         debug!("complete Authenticate -> {:?}", r);
+        r
+    }
+
+    pub async fn command_confirmation(
+        &self,
+        username: &String,
+        lgn: &PublicKeyCredential,
+    ) -> WebauthnResult<()> {
+        debug!(
+            "handle CommandConfirmation -> (username: {:?}, lgn: {:?})",
+            username, lgn
+        );
+
+        let mut user_chan = username.clone();
+        user_chan.push_str("@");
+        let recv_chan = self.wan.extract_original_challenge(lgn)?;
+        let mut user_chan_vector = user_chan.as_bytes().to_vec();
+        user_chan_vector.extend(recv_chan);
+
+        let username = username.as_bytes().to_vec();
+
+        let st = self
+            .commconf_chals
+            .lock()
+            .await
+            .pop(&user_chan_vector)
+            .ok_or(WebauthnError::ChallengeNotFound)?;
+
+        let mut creds = self.creds.lock().await;
+        let r = self
+            .wan
+            .authenticate_credential(lgn, &st)
+            .map(|(cred_id, auth_data)| {
+                let _ = match creds.get_mut(&username) {
+                    Some(v) => {
+                        let mut c = v.remove(cred_id).unwrap();
+                        c.counter = auth_data.counter;
+                        v.insert(cred_id.clone(), c);
+                        Ok(())
+                    }
+                    None => {
+                        // Invalid state but not end of world ...
+                        Err(())
+                    }
+                };
+                ()
+            });
+        debug!("complete CommandConfirmation -> {:?}", r);
         r
     }
 }

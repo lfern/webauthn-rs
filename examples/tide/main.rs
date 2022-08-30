@@ -89,6 +89,22 @@ async fn challenge_login(request: tide::Request<AppState>) -> tide::Result {
     Ok(res)
 }
 
+async fn challenge_command_confirmation(mut request: tide::Request<AppState>) -> tide::Result {
+    let username = request.param("username")?.parse()?;
+    let command =  request.body_string().await?;
+    let actor_res = request.state().challenge_command_confirmation(&username, &command).await;
+    let res = match actor_res {
+        Ok(chal) => tide::Response::builder(tide::StatusCode::Ok)
+            .body(tide::Body::from_json(&chal)?)
+            .build(),
+        Err(e) => {
+            debug!("challenge_login -> {:?}", e);
+            tide::Response::new(tide::StatusCode::InternalServerError)
+        }
+    };
+    Ok(res)
+}
+
 async fn register(mut request: tide::Request<AppState>) -> tide::Result {
     let username = request.param("username")?.parse()?;
     let reg = request.body_json::<RegisterPublicKeyCredential>().await?;
@@ -124,6 +140,26 @@ async fn login(mut request: tide::Request<AppState>) -> tide::Result {
 
     // Set the userid
     session.insert_raw("userid", username);
+
+    Ok(tide::Response::new(tide::StatusCode::Ok))
+}
+
+async fn command_confirmation(mut request: tide::Request<AppState>) -> tide::Result {
+    let username: String = request.param("username")?.parse()?;
+    let username_copy = username.clone();
+    let lgn = request.body_json::<PublicKeyCredential>().await?;
+
+    match request.state().command_confirmation(&username_copy, &lgn).await {
+        Ok(()) => (),
+        Err(e) => {
+            debug!("login -> {:?}", e);
+            return Ok(tide::Response::new(tide::StatusCode::InternalServerError));
+        }
+    };
+
+    let session = request.session_mut();
+
+    // TODO: do whatever to do with this confirmation
 
     Ok(tide::Response::new(tide::StatusCode::Ok))
 }
@@ -170,9 +206,12 @@ async fn main() -> tide::Result<()> {
         .post(challenge_register);
     app.at(&format!("{}/challenge/login/:username", prefix))
         .post(challenge_login);
+    app.at(&format!("{}/challenge/command/:username", prefix))
+        .post(challenge_command_confirmation);
     app.at(&format!("{}/register/:username", prefix))
         .post(register);
     app.at(&format!("{}/login/:username", prefix)).post(login);
+    app.at(&format!("{}/command/:username", prefix)).post(command_confirmation);
 
     if opt.enable_tls {
         debug!("Starting with TLS ...");

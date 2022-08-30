@@ -1,0 +1,22 @@
+RUSTFLAGS='-C target-feature=+crt-static' cargo build --example tide --target=aarch64-unknown-linux-gnu
+RUSTFLAGS='-C target-feature=+crt-static' cargo build --example tide --target=aarch64-unknown-linux-musl
+
+
+------------------------------------------------
+extern crate getrandom;
+use getrandom::Error;
+use core::num::NonZeroU32;
+use getrandom::register_custom_getrandom;
+
+// Some application-specific error code
+const MY_CUSTOM_ERROR_CODE: u32 = Error::CUSTOM_START + 42;
+pub fn always_fail(buf: &mut [u8]) -> Result<(), Error> {
+    debug!("mycust");
+    let code = NonZeroU32::new(MY_CUSTOM_ERROR_CODE).unwrap();
+    Err(Error::from(code))
+}
+
+register_custom_getrandom!(always_fail);
+
+
+------------------------------------------------

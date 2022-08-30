@@ -13,6 +13,7 @@ use wasm_bindgen_futures::spawn_local;
 pub struct App {
     link: ComponentLink<Self>,
     username: String,
+    command: String,
     toastmsg: Option<String>,
     // An active fetch task/cb cycle.
     ft: Option<FetchTask>,
@@ -20,13 +21,17 @@ pub struct App {
 
 pub enum AppMsg {
     UserNameInput(String),
+    CommandInput(String),
     Login,
     Register,
+    CommandConfirmation,
     DoNothing,
     BeginRegisterChallenge(web_sys::CredentialCreationOptions, String),
     CompleteRegisterChallenge(JsValue, String),
     BeginLoginChallenge(web_sys::CredentialRequestOptions, String, Option<String>),
     CompleteLoginChallenge(JsValue, String),
+    BeginCommandConfirmationChallenge(web_sys::CredentialRequestOption),
+    CompleteCommandConfirmation(JsValue, String),
     Toast(String)
 }
 
@@ -121,6 +126,52 @@ impl App {
         FetchService::fetch_binary(request, callback).unwrap()
     }
 
+    fn command_confirmation_begin(&mut self, username: String, message: String) -> FetchTask {
+        let username_copy = username.clone();
+        let message_copy = message.clone();
+        let callback = self.link.callback(
+            move |response: Response<Json<Result<RequestChallengeResponse, Error>>>| {
+                let (parts, body) = response.into_parts();
+                ConsoleService::log(format!("parts -> {:?}", parts).as_str());
+                ConsoleService::log(format!("body -> {:?}", body).as_str());
+                match body {
+                    Json(Ok(rcr)) => {
+                        let chal1: Vec<u8> = rcr.public_key.challenge.clone().into();
+                        let str = String::from_utf8_lossy(&chal1);
+                        ConsoleService::log(format!("lfern1 -> {:?}", str).as_str());
+                        let chal2: NewChallenge = serde_json::from_str(&str).unwrap();
+                        ConsoleService::log(format!("lfern1 -> {:?}", chal2).as_str());
+                        let c_options = rcr.into();
+                        AppMsg::BeginCommandConfirmationChallenge(c_options, username_copy.clone(), Some(chal2.cmd.clone()))
+                    }
+                    Json(Err(_)) => {
+                        AppMsg::DoNothing
+                    }
+                }
+            }
+        );
+        let request = Request::post(format!("/auth/challenge/command/{}", username))
+            .body(message)
+            .unwrap();
+        FetchService::fetch_binary(request, callback).unwrap()
+    }
+
+    fn command_confirmation_complete(&mut self, data: web_sys::PublicKeyCredential, username: String, message: String) -> FetchTask {
+
+        let pkc = PublicKeyCredential::from(data);
+
+        let callback = self.link.callback(
+            move |response: Response<Nothing>| {
+                let (parts, _body) = response.into_parts();
+                ConsoleService::log(format!("parts -> {:?}", parts).as_str());
+                AppMsg::Toast("Command confirmation Success! 🎉".to_string())
+            });
+        let request = Request::post(format!("/auth/command/{}", username))
+            .body(Json(&pkc))
+            .unwrap();
+        FetchService::fetch_binary(request, callback).unwrap()
+    }
+
 }
 
 impl Component for App {
@@ -129,7 +180,7 @@ impl Component for App {
 
     fn create(_: Self::Properties, link: ComponentLink<Self>) -> Self {
         ConsoleService::log(format!("create").as_str());
-        App { link, username: "".to_string(), ft: None, toastmsg: 
+        App { link, username: "".to_string(), command: "".to_string(), ft: None, toastmsg: 
             None
         }
     }
@@ -143,6 +194,9 @@ impl Component for App {
             AppMsg::DoNothing => {}
             AppMsg::UserNameInput(mut username) => {
                 std::mem::swap(&mut self.username, &mut username)
+            }
+            AppMsg::CommandInput(mut command) => {
+                std::mem::swap(&mut self.command, &mut command)
             }
             AppMsg::Toast(msg) => {
                 ConsoleService::log(format!("toast -> {:?}", msg).as_str());
@@ -236,6 +290,58 @@ impl Component for App {
                     web_sys::PublicKeyCredential::from(jsv)
                     , username));
             }
+            
+            AppMsg::CommandConfirmation => {
+                ConsoleService::log(format!("command confirmation -> {:?} {:?}", self.username, self.command).as_str());
+                let username = self.username.clone();
+                let command = self.command.clone();
+                self.ft = Some(self.command_confirmation_begin(username, command));
+            }
+            AppMsg::BeginCommandConfirmationChallenge(cro, username, message) => {
+                if let Some(win) = web_sys::window() {
+
+                    let cont = match message {
+                        Some(message) => {
+                            win.confirm_with_message(
+                                format!("Do you want to confirm this command?\n{}", message).as_str()
+                            ).expect("Unable to show message")
+                        },
+                        _ => true
+                    };
+
+                    if cont {
+                        ConsoleService::log(format!("cro -> {:?}", cro).as_str());
+                        let promise = win.navigator()
+                            .credentials()
+                            .get_with_options(&cro)
+                            .expect("Unable to create promise");
+                        let fut = JsFuture::from(promise);
+                        let linkc = self.link.clone();
+
+                        spawn_local(async move {
+                            match fut.await {
+                                Ok(data) => {
+                                    linkc.send_message(AppMsg::CompleteCommandConfirmationChallenge(data, username, message));
+                                }
+                                Err(e) => {
+                                    ConsoleService::log(format!("error -> {:?}", e).as_str());
+                                    linkc.send_message(AppMsg::DoNothing);
+                                }
+                            }
+                        });
+                    } else {
+                        ConsoleService::log(format!("command confirmation canceled by user").as_str());    
+                    }
+
+                } else {
+                    ConsoleService::log(format!("command confirmation failed for -> {:?}", self.username).as_str());
+                }
+            }
+            AppMsg::CompleteCommandConfirmationChallenge(jsv, username, message) => {
+                self.ft = Some(self.command_confirmation_complete(
+                    web_sys::PublicKeyCredential::from(jsv)
+                    , username, message));
+            }
         };
         true
     }
@@ -291,6 +397,13 @@ impl Component for App {
                                 <input id="username" type="text" class="form-control" value=self.username oninput=self.link.callback(|e: InputData| AppMsg::UserNameInput(e.value)) />
                                 <button type="button" class="btn btn-dark" onclick=self.link.callback(|_| AppMsg::Register)>{" Register "}</button>
                                 <button type="button" class="btn btn-dark" onclick=self.link.callback(|_| AppMsg::Login)>{" Login "}</button>
+                            </div>
+                        </div>
+                        <div class="container">
+                            <div>
+                                <input id="username" type="text" class="form-control" value=self.username oninput=self.link.callback(|e: InputData| AppMsg::UserNameInput(e.value)) />
+                                <input id="command" type="text" class="form-control" value=self.command oninput=self.link.callback(|e: InputData| AppMsg::CommandInput(e.value)) />
+                                <button type="button" class="btn btn-dark" onclick=self.link.callback(|_| AppMsg::ConfirmCommand)>{" Confirm command "}</button>
                             </div>
                         </div>
                     </div>

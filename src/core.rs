@@ -543,6 +543,26 @@ impl<T> Webauthn<T> {
         Ok((credential, data.attestation_object.auth_data))
     }
 
+    /// Extract original challenge from response
+    pub fn extract_original_challenge(
+        &self,
+        rsp: &PublicKeyCredential,
+    ) -> Result<Vec<u8>, WebauthnError>
+    where
+        T: WebauthnConfig,
+    {
+        // Let JSONtext be the result of running UTF-8 decode on the value of cData.
+        let data:AuthenticatorAssertionResponse<Authentication> = 
+            AuthenticatorAssertionResponse::try_from(&rsp.response).map_err(|e| {
+                debug!("AuthenticatorAssertionResponse::try_from -> {:?}", e);
+                e
+        })?;
+
+        let c = &data.client_data;
+
+        Ok(c.challenge.0.clone())
+    }
+
     // https://w3c.github.io/webauthn/#verifying-assertion
     pub(crate) fn verify_credential_internal(
         &self,
@@ -962,6 +982,66 @@ impl<T> Webauthn<T> {
         } else {
             Ok(())
         }
+    }
+
+    /// Generate challenge for command confirmation
+    pub fn generate_challenge_command_confirmation_options(
+        &self,
+        creds: Vec<Credential>,
+        extensions: Option<RequestAuthenticationExtensions>,
+        command: &String,
+    ) -> Result<(RequestChallengeResponse, AuthenticationState), WebauthnError>
+    where
+        T: WebauthnConfig,
+    {
+        let (verified, unverified): (Vec<Credential>, Vec<Credential>) = creds
+            .into_iter()
+            .partition(|cred| cred.registration_policy == UserVerificationPolicy::Required);
+
+        match (verified.len(), unverified.len()) {
+            (_, 0) => self.generate_challenge_command_confirmation_inner(
+                verified,
+                UserVerificationPolicy::Required,
+                extensions,
+                command,
+            ),
+            (0, _) => self.generate_challenge_command_confirmation_inner(
+                unverified,
+                UserVerificationPolicy::Discouraged,
+                extensions,
+                command,
+            ),
+            (_, _) => Err(WebauthnError::InconsistentUserVerificationPolicy),
+        }
+    }
+
+    fn generate_challenge_command_confirmation_inner(
+        &self,
+        creds: Vec<Credential>,
+        policy: UserVerificationPolicy,
+        extensions: Option<RequestAuthenticationExtensions>,
+        command: &String,
+    ) -> Result<(RequestChallengeResponse, AuthenticationState), WebauthnError> 
+    where
+        T: WebauthnConfig,
+    {
+        
+        let mut ret = self.generate_challenge_authenticate_inner(
+            creds,
+            policy,
+            extensions,
+        )?;
+
+        let new_chal = NewChallenge {
+            cha: ret.0.public_key.challenge.clone().into(),
+            cmd: command.to_string(),
+        };
+
+        let new_chal2 = serde_json::to_string(&new_chal).unwrap();
+        let chal = Challenge::new(new_chal2.as_bytes().to_vec());
+        ret.0.public_key.challenge = chal.clone().into();
+        ret.1.challenge = chal.into();
+        Ok(ret)
     }
 }
 
